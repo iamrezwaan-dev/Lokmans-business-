@@ -3,11 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Advanced AED/BDT Money Manager</title>
+    <title>Advanced Currency Flow Manager</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Font Awesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Chart.js for visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --primary-color: #059669; /* Emerald 600 */
@@ -35,6 +37,41 @@
         /* Direction indicators */
         .direction-inbound { color: var(--primary-color); border-left-color: var(--primary-color); }
         .direction-outbound { color: #DC2626; border-left-color: #DC2626; } /* Red 600 */
+        
+        /* Animation for new transactions */
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .transaction-item {
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        /* Custom checkbox */
+        .custom-checkbox {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #D1D5DB;
+            border-radius: 4px;
+            outline: none;
+            cursor: pointer;
+            position: relative;
+        }
+        .custom-checkbox:checked {
+            background-color: var(--primary-color);
+            border-color: var(--primary-color);
+        }
+        .custom-checkbox:checked::after {
+            content: "✓";
+            position: absolute;
+            color: white;
+            font-size: 14px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
     </style>
     <script>
         tailwind.config = {
@@ -99,6 +136,18 @@
                 <div class="p-3 rounded-lg border-2 border-accent bg-blue-50">
                     <p class="text-sm font-semibold text-accent mb-1">BDT NET BALANCE</p>
                     <p id="bdt-balance" class="text-2xl font-black text-accent">0.00 BDT</p>
+                </div>
+            </div>
+            
+            <!-- Visualization Section -->
+            <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-white p-4 rounded-lg border">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-2">Balance Overview</h3>
+                    <canvas id="balance-chart" height="200"></canvas>
+                </div>
+                <div class="bg-white p-4 rounded-lg border">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-2">Transaction Distribution</h3>
+                    <canvas id="distribution-chart" height="200"></canvas>
                 </div>
             </div>
         </div>
@@ -207,35 +256,11 @@
         </div>
     </div>
 
-    <!-- Firebase SDK Imports -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, addDoc, onSnapshot, collection, query, serverTimestamp, updateDoc, deleteDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Set Firebase logging level to Debug
-        setLogLevel('Debug');
-
-        // --- CRITICAL CONFIGURATION SECTION ---
-        // !!! IMPORTANT !!! You MUST replace the placeholder values below with the actual
-        // Firebase configuration data you received from your project settings.
-        
-        const appId = 'lokmans-business'; // Consistent App ID for Firestore path
-
-        const firebaseConfig = {
-             apiKey: "YOUR_FIREBASE_API_KEY_HERE",
-             authDomain: "YOUR_FIREBASE_AUTH_DOMAIN_HERE",
-             projectId: "YOUR_FIREBASE_PROJECT_ID_HERE",
-             storageBucket: "YOUR_FIREBASE_STORAGE_BUCKET_HERE",
-             messagingSenderId: "YOUR_FIREBASE_MESSAGING_SENDER_ID_HERE",
-             appId: "YOUR_FIREBASE_APP_ID_HERE"
-        };
-        // --- CRITICAL CONFIGURATION SECTION END ---
-        
-        let db, auth, userId = null;
-        let isAuthReady = false;
-        let unsubscribeSnapshot = null;
-        let currentTransactions = [];
+    <script>
+        // --- Application State ---
+        let transactions = [];
+        let currentFilter = 'all';
+        let balanceChart, distributionChart;
 
         // --- DOM Elements ---
         const statusMessageEl = document.getElementById('status-message');
@@ -254,6 +279,19 @@
         const bdtDebitEl = document.getElementById('bdt-debit');
         const bdtBalanceEl = document.getElementById('bdt-balance');
 
+        // Form elements
+        const directionEl = document.getElementById('direction');
+        const amountEl = document.getElementById('amount');
+        const currencyEl = document.getElementById('currency');
+        const nameEl = document.getElementById('name');
+        const phoneEl = document.getElementById('phone');
+        const paymentMethodEl = document.getElementById('paymentMethod');
+        const accountNumberEl = document.getElementById('accountNumber');
+        const statusEl = document.getElementById('status');
+        const submitBtn = document.getElementById('submit-btn');
+
+        // --- Utility Functions ---
+
         /**
          * Utility function to display status or error messages.
          */
@@ -269,111 +307,121 @@
             } else {
                 statusMessageEl.classList.add('bg-blue-100', 'text-blue-700', 'text-sm');
             }
-            // Do not hide FATAL errors
-            if (message.includes("FATAL ERROR") || type === 'error') return;
 
             // Use setTimeout to hide the message after a delay
-            setTimeout(() => {
-                // Check if the message hasn't been replaced by a new one
-                if (statusMessageEl.textContent === message) {
-                    statusMessageEl.classList.add('hidden');
-                }
-            }, 5000);
-        }
-
-        /**
-         * Initializes Firebase and authenticates the user.
-         */
-        async function initializeFirebase() {
-            try {
-                // Check if the config is still the placeholder before proceeding
-                if (firebaseConfig.apiKey === "YOUR_FIREBASE_API_KEY_HERE") {
-                    userInfoEl.textContent = 'User ID: CONFIG ERROR';
-                    throw new Error("FATAL ERROR: Firebase configuration details are missing or are still placeholders. Please update firebaseConfig.");
-                }
-
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                
-                // Set session persistence so the user doesn't lose data on refresh
-                await setPersistence(auth, browserSessionPersistence);
-
-                // Wait for the initial authentication state to be determined
-                await new Promise((resolve, reject) => {
-                    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-                        if (!user) {
-                            try {
-                                // Attempt to sign in anonymously
-                                await signInAnonymously(auth);
-                            } catch(e) {
-                                reject(e); // Reject the promise if anonymous sign-in fails
-                            }
-                        }
-                        // Authentication is successful at this point
-                        userId = auth.currentUser?.uid || 'anonymous-user'; 
-                        userInfoEl.textContent = `User ID: ${userId}`;
-                        isAuthReady = true;
-                        unsubscribe(); 
-                        resolve();
-                    });
-                });
-
-                console.log("Firebase initialized. User ID:", userId);
-                fetchTransactions();
-
-            } catch (error) {
-                // This catches config errors and auth sign-in errors
-                userInfoEl.textContent = 'User ID: FAILED';
-                
-                // Extract error message for better display
-                let errorMessage = "Authentication failed. Check your configuration and console.";
-                if (error.code) {
-                    errorMessage = `Firebase Auth Error: ${error.code} (${error.message})`;
-                } else if (error.message && error.message.includes("FATAL ERROR")) {
-                    errorMessage = error.message;
-                } else {
-                     errorMessage = `Initialization Failed: ${error.message}`;
-                }
-                
-                console.error("Firebase initialization failed:", error);
-                displayMessage(errorMessage, 'error');
-                
-                // Suggest common fixes
-                if (!error.message.includes("FATAL ERROR")) {
-                     displayMessage("FATAL ERROR: Authentication failed. Please verify your Firebase project settings (API Key, Auth Domain) and ensure 'Anonymous' sign-in is enabled under the Authentication tab.", 'error');
-                }
+            if (type !== 'error') {
+                setTimeout(() => {
+                    // Check if the message hasn't been replaced by a new one
+                    if (statusMessageEl.textContent === message) {
+                        statusMessageEl.classList.add('hidden');
+                    }
+                }, 5000);
             }
         }
 
         /**
-         * Gets the Firestore collection reference path for private data.
+         * Generates a unique ID for transactions
          */
-        function getCollectionPath() {
-            if (!userId) return null;
-            // Standard path for private user data
-            return `artifacts/${appId}/users/${userId}/transactions`;
+        function generateId() {
+            return 'txn_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         }
 
         /**
-         * Calculates and updates the total amounts for AED and BDT.
-         * @param {Array<Object>} transactions - The list of transaction objects.
+         * Formats a date to a readable string
          */
-        function calculateTotals(transactions) {
-            let aedCredit = 0, aedDebit = 0;
-            let bdtCredit = 0, bdtDebit = 0;
+        function formatDate(date) {
+            return new Date(date).toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
 
-            transactions.forEach(t => {
-                const amount = parseFloat(t.amount);
-                // Only count transactions that are not fully 'Done' for active balance
-                if (t.status !== 'Done') { 
-                    if (t.currency === 'AED') {
-                        if (t.direction === 'Inbound (Credit)') {
-                            aedCredit += amount;
-                        } else {
-                            aedDebit += amount;
-                        }
-                    } else if (t.currency === 'BDT') {
-                        if (t.direction === 'Inbound (Credit)') {
-                            bdtCredit += amount;
+        /**
+         * Gets the month and year from a date string
+         */
+        function getMonthYear(dateString) {
+            const date = new Date(dateString);
+            return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+        }
+
+        /**
+         * Gets the month key for grouping (YYYY-MM format)
+         */
+        function getMonthKey(dateString) {
+            const date = new Date(dateString);
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+        }
+
+        // --- Data Management ---
+
+        /**
+         * Saves transactions to localStorage
+         */
+        function saveTransactions() {
+            try {
+                localStorage.setItem('currencyFlowTransactions', JSON.stringify(transactions));
+                return true;
+            } catch (error) {
+                console.error('Error saving transactions:', error);
+                displayMessage('Failed to save transactions to local storage', 'error');
+                return false;
+            }
+        }
+
+        /**
+         * Loads transactions from localStorage
+         */
+        function loadTransactions() {
+            try {
+                const stored = localStorage.getItem('currencyFlowTransactions');
+                if (stored) {
+                    transactions = JSON.parse(stored);
+                    return true;
+                }
+            } catch (error) {
+                console.error('Error loading transactions:', error);
+                displayMessage('Failed to load transactions from local storage', 'error');
+            }
+            return false;
+        }
+
+        /**
+         * Adds a new transaction
+         */
+        function addTransaction(transactionData) {
+            const newTransaction = {
+                id: generateId(),
+                timestamp: new Date().toISOString(),
+                ...transactionData
+            };
             
+            transactions.unshift(newTransaction); // Add to beginning of array
+            saveTransactions();
+            renderTransactions();
+            calculateTotals();
+            updateCharts();
+            displayMessage('Transaction added successfully!', 'success');
+            
+            // Reset form
+            transactionForm.reset();
+        }
+
+        /**
+         * Updates an existing transaction
+         */
+        function updateTransaction(id, updates) {
+            const index = transactions.findIndex(t => t.id === id);
+            if (index !== -1) {
+                transactions[index] = { ...transactions[index], ...updates };
+                saveTransactions();
+                renderTransactions();
+                calculateTotals();
+                updateCharts();
+                displayMessage('Transaction updated successfully!', 'success');
+                return true;
+            }
+            return false;
+      
